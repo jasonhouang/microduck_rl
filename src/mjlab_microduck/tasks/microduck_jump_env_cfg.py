@@ -368,14 +368,13 @@ def make_microduck_jump_env_cfg(
         )
 
     if ENABLE_MASS_INERTIA_RANDOMIZATION:
+        _mi_lo, _mi_hi = MASS_INERTIA_RANDOMIZATION_RANGE
         cfg.events["randomize_mass_inertia"] = EventTermCfg(
             func=dr.pseudo_inertia,
-            mode="reset",
+            mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "operation": "scale",
-                "mass_range": MASS_INERTIA_RANDOMIZATION_RANGE,
-                "inertia_range": MASS_INERTIA_RANDOMIZATION_RANGE,
+                "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+                "alpha_range": (math.log(_mi_lo) / 2.0, math.log(_mi_hi) / 2.0),
             },
         )
 
@@ -384,7 +383,8 @@ def make_microduck_jump_env_cfg(
             func=microduck_mdp.randomize_bam_friction,
             mode="reset",
             params={
-                "friction_range": JOINT_FRICTION_RANDOMIZATION_RANGE,
+                "asset_cfg": SceneEntityCfg("robot"),
+                "scale_range": JOINT_FRICTION_RANDOMIZATION_RANGE,
             },
         )
 
@@ -393,10 +393,9 @@ def make_microduck_jump_env_cfg(
             func=dr.joint_armature,
             mode="reset",
             params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "joint_names": r"^(?!passive_).*",
+                "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",)),
                 "operation": "scale",
-                "multiplier_range": ARMATURE_RANDOMIZATION_RANGE,
+                "ranges": ARMATURE_RANDOMIZATION_RANGE,
             },
         )
 
@@ -413,7 +412,7 @@ def make_microduck_jump_env_cfg(
     # Phase 1: Learn to leave the ground (0-1000 iter)
     # Phase 2: Maximize height (1000-3000 iter)
     # Phase 3: Optimize landing (3000-5000 iter)
-    cfg.curriculum = CurriculumTermCfg(
+    cfg.curriculum["jump_stages"] = CurriculumTermCfg(
         func=microduck_mdp.curriculum_reward_weight,
         params={
             "stages": [

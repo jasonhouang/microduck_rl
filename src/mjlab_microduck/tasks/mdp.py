@@ -7377,23 +7377,25 @@ def randomize_encoder_bias(
 
 def curriculum_reward_weight(
     env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
     stages: list[dict],
-) -> dict[str, float]:
+) -> torch.Tensor:
     """Curriculum for reward weights across training stages.
     
-    Args:
-        env: The environment
-        stages: List of stage dicts with "step" and "reward_weights" keys
-    
-    Returns:
-        Dict mapping reward names to weights for current stage
+    Mutates live RewardManager term weights at scheduled steps.
+    stages: list of {"step": int, "reward_weights": {name: weight}}.
     """
+    del env_ids
     step = env.common_step_counter
-    
     # Find current stage
-    current_stage = stages[0]
+    current = stages[0]
     for stage in stages:
         if step >= stage["step"]:
-            current_stage = stage
-    
-    return current_stage.get("reward_weights", {})
+            current = stage
+    for name, weight in current.get("reward_weights", {}).items():
+        try:
+            term_cfg = env.reward_manager.get_term_cfg(name)
+            term_cfg.weight = weight
+        except KeyError:
+            pass
+    return torch.tensor([0.0])
