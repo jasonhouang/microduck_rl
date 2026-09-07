@@ -7186,3 +7186,214 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ============================================================================
+# Jump task rewards
+# ============================================================================
+
+def height_jump_reward(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    target_height: float = 0.165,
+) -> torch.Tensor:
+    """Potential-based height reward for jumping.
+    
+    Rewards incremental height gains (potential-based), not absolute height.
+    Camping at any height pays zero per step. Uses max-so-far tracking so
+    the policy is rewarded for reaching new heights.
+    
+    Args:
+        env: The environment
+        asset_cfg: Asset configuration for the robot
+        target_height: Target height above standing (STAND_Z + jump_height)
+    
+    Returns:
+        Reward tensor (num_envs,) - potential-based height gain
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    
+    # Get current trunk height
+    z = asset.data.root_link_pos_w[:, 2]
+    
+    # Track max height seen in this episode
+    if not hasattr(env, '_jump_max_height'):
+        env._jump_max_height = torch.zeros(env.num_envs, device=env.device)
+    
+    max_height = env._jump_max_height
+    new_max = torch.maximum(max_height, z)
+    
+    # Reward is the incremental height gain
+    reward = new_max - max_height
+    
+    # Update max height
+    env._jump_max_height = new_max
+    
+    return reward
+
+
+def air_time_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+) -> torch.Tensor:
+    """Reward for time spent in the air (both feet off ground).
+    
+    Encourages the policy to actually leave the ground during a jump.
+    
+    Args:
+        env: The environment
+        sensor_name: Name of the feet contact sensor
+    
+    Returns:
+        Reward tensor (num_envs,) - 1.0 if both feet in air, 0.0 otherwise
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found  # (num_envs, num_feet)
+    
+    # Both feet in air
+    if found.dim() > 1:
+        both_feet_air = (found.sum(dim=-1) == 0).float()
+    else:
+        both_feet_air = (found == 0).float()
+    
+    return both_feet_air
+
+
+def landing_stability_reward(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    sensor_name: str = "feet_ground_contact",
+    stand_z: float = 0.115,
+    height_tolerance: float = 0.02,
+) -> torch.Tensor:
+    """Reward for stable landing after a jump.
+    
+    Gated on both feet touching ground and trunk height near standing height.
+    Rewards staying upright and stable after landing.
+    
+    Args:
+        env: The environment
+        asset_cfg: Asset configuration for the robot
+        sensor_name: Name of the feet contact sensor
+        stand_z: Standing trunk height
+        height_tolerance: How close to stand_z is acceptable
+    
+    Returns:
+        Reward tensor (num_envs,) - stability score when landing
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    
+    # Check if both feet are on ground
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    
+    if found.dim() > 1:
+        both_feet_ground = (found.sum(dim=-1) >= 2).float()
+    else:
+        both_feet_ground = (found > 0).float()
+    
+    # Check if trunk is near standing height
+    z = asset.data.root_link_pos_w[:, 2]
+    height_ok = (torch.abs(z - stand_z) < height_tolerance).float()
+    
+    # Check if upright (projected gravity z-component near -1)
+    gravity = asset.data.root_link_quat_w
+    # Simple upright check: quaternion w-component near 1
+    upright = torch.abs(gravity[:, 0]) > 0.9
+    
+    # All conditions must be met
+    landing_stable = both_feet_ground * height_ok * upright.float()
+    
+    return landing_stable
+
+
+def impact_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    force_threshold: float = 20.0,
+) -> torch.Tensor:
+    """Penalize high impact forces during landing.
+    
+    Protects servos from damage by penalizing landing forces above a threshold.
+    Uses contact force magnitude from the feet contact sensor.
+    
+    Args:
+        env: The environment
+        asset_cfg: Asset configuration for the robot
+        force_threshold: Force (N) above which penalty is applied
+    
+    Returns:
+        Penalty tensor (num_envs,) - positive quantity, use negative weight
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    
+    # Get vertical velocity (impact indicator)
+    vz = asset.data.root_link_lin_vel_w[:, 2]
+    
+    # Penalty when landing with high downward velocity
+    # vz < 0 means moving down
+    impact = torch.clamp(-vz - force_threshold / 10.0, min=0.0)
+    
+    return impact
+
+
+def randomize_encoder_bias(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    bias_range: tuple[float, float] = (-0.015, 0.015),
+) -> None:
+    """Randomize joint encoder bias for domain randomization.
+    
+    Simulates per-env joint encoder calibration offset.
+    
+    Args:
+        env: The environment
+        env_ids: Environment indices to randomize
+        bias_range: Range of bias values (radians)
+    """
+    if len(env_ids) == 0:
+        return
+    
+    asset: Entity = env.scene["robot"]
+    
+    # Initialize bias if not exists
+    if not hasattr(asset.data, 'encoder_bias'):
+        asset.data.encoder_bias = torch.zeros(
+            env.num_envs, 14, device=env.device
+        )
+    
+    # Sample random bias for each joint
+    bias = torch.rand(len(env_ids), 14, device=env.device)
+    bias = bias * (bias_range[1] - bias_range[0]) + bias_range[0]
+    
+    asset.data.encoder_bias[env_ids] = bias
+
+
+def curriculum_reward_weight(
+    env: ManagerBasedRlEnv,
+    stages: list[dict],
+) -> dict[str, float]:
+    """Curriculum for reward weights across training stages.
+    
+    Args:
+        env: The environment
+        stages: List of stage dicts with "step" and "reward_weights" keys
+    
+    Returns:
+        Dict mapping reward names to weights for current stage
+    """
+    step = env.common_step_counter
+    
+    # Find current stage
+    current_stage = stages[0]
+    for stage in stages:
+        if step >= stage["step"]:
+            current_stage = stage
+    
+    return current_stage.get("reward_weights", {})
