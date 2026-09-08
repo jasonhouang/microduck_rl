@@ -235,6 +235,15 @@ def make_microduck_jump_env_cfg(
     del cfg.observations["actor"].terms["height_scan"]
     del cfg.observations["critic"].terms["height_scan"]
 
+    # NaN-safe wrappers for sensor-derived critic terms (same as standup).
+    # Jumping involves landing and flipping, so degenerate contacts are likely.
+    for _term, _safe in (
+        ("foot_contact_forces", microduck_mdp.foot_contact_forces_safe),
+        ("foot_air_time", microduck_mdp.foot_air_time_safe),
+    ):
+        if _term in cfg.observations["critic"].terms:
+            cfg.observations["critic"].terms[_term].func = _safe
+
     gravity_term_name = "projected_gravity"
     cfg.observations["actor"].terms[gravity_term_name] = deepcopy(
         cfg.observations["actor"].terms[gravity_term_name]
