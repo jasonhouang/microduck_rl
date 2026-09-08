@@ -150,37 +150,85 @@ def make_microduck_jump_env_cfg(
         if name in cfg.rewards:
             del cfg.rewards[name]
 
-    # ── Rewards: jump objective ───────────────────────────────────────────────
-    # Height reward: potential-based, rewards incremental height gains
-    cfg.rewards["height_jump"] = RewardTermCfg(
-        func=microduck_mdp.height_jump_reward,
+    # ── Rewards: jump objective (standup-inspired design) ─────────────────────
+    # Target jump height: standing height + minimum jump height
+    TARGET_JUMP_Z = STAND_Z + MIN_JUMP_HEIGHT  # 0.115 + 0.05 = 0.165m
+    
+    # ── Height rewards: dual-layer Gaussian (standup pattern) ─────────────────
+    # Wide Gaussian: bootstrap pull from standing to crouch to jump
+    cfg.rewards["height_jump_wide"] = RewardTermCfg(
+        func=microduck_mdp.height_target_gaussian,
+        weight=1.5,
+        params={
+            "std": 0.04,  # 4cm - covers the crouch-to-jump range
+            "target_height": TARGET_JUMP_Z,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    
+    # Narrow Gaussian: sharp peak at target height for precision
+    cfg.rewards["height_jump_sharp"] = RewardTermCfg(
+        func=microduck_mdp.height_target_gaussian,
+        weight=1.5,
+        params={
+            "std": 0.015,  # 1.5cm - strong gradient near target
+            "target_height": TARGET_JUMP_Z,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    
+    # L1 height penalty: prevents "stay low" local optimum (standup pattern)
+    cfg.rewards["height_jump_l1"] = RewardTermCfg(
+        func=microduck_mdp.height_l1_penalty,
         weight=5.0,
         params={
+            "target_height": TARGET_JUMP_Z,
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
-            "target_height": STAND_Z + MIN_JUMP_HEIGHT,
         },
     )
 
+    # ── Motion guidance: upward velocity reward ───────────────────────────────
+    # Rewards upward CoM velocity during the jump phase (standup's com_upward_velocity)
+    # Critical for bootstrapping: makes any upward motion immediately positive
+    cfg.rewards["com_upward_velocity"] = RewardTermCfg(
+        func=microduck_mdp.com_upward_velocity,
+        weight=1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+            "max_height": TARGET_JUMP_Z + 0.02,  # gate off just above target
+        },
+    )
+    
     # Air time reward: encourages leaving the ground
     cfg.rewards["air_time_jump"] = RewardTermCfg(
         func=microduck_mdp.air_time_reward,
-        weight=1.0,
+        weight=0.5,
         params={
             "sensor_name": feet_ground_cfg.name,
         },
     )
 
-    # Landing stability: rewards staying upright after landing
-    cfg.rewards["landing_stable"] = RewardTermCfg(
-        func=microduck_mdp.landing_stability_reward,
-        weight=2.0,
+    # ── Upright rewards: dual-layer (standup pattern) ─────────────────────────
+    # Linear upright: cos(tilt), strong gradient at high tilt
+    cfg.rewards["upright_linear"] = RewardTermCfg(
+        func=microduck_mdp.body_upright_linear,
+        weight=1.5,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
+    )
+    
+    # Sharp upright: Gaussian at height, strong gradient near vertical
+    cfg.rewards["upright_sharp"] = RewardTermCfg(
+        func=microduck_mdp.upright_gaussian_at_height,
+        weight=1.5,
         params={
+            "std": 0.3,  # ~17° - visible gradient at lean basin
+            "height_low": STAND_Z - 0.02,  # active from crouch
+            "height_high": TARGET_JUMP_Z,
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
-            "sensor_name": feet_ground_cfg.name,
-            "stand_z": STAND_Z,
         },
     )
 
+    # ── Pose rewards ──────────────────────────────────────────────────────────
     # Legs at HOME (loose std to allow crouch)
     cfg.rewards["pose_stand_legs"] = RewardTermCfg(
         func=microduck_mdp.pose_target_match,
@@ -192,36 +240,52 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # Neck/head at HOME
-    cfg.rewards["pose_stand_neck"] = RewardTermCfg(
-        func=microduck_mdp.pose_target_match,
+    # ── Composite reward: multiplicative goal-state score ─────────────────────
+    # height × upright × pose - all must be satisfied simultaneously
+    cfg.rewards["jump_composite"] = RewardTermCfg(
+        func=microduck_mdp.standing_composite_score,
+        weight=2.0,
+        params={
+            "target_height": TARGET_JUMP_Z,
+            "height_std": 0.04,  # broad, covers the jump range
+            "upright_std": 0.40,  # ~23° - lean basin scores ~0.3
+            "pose_std": 0.50,  # joint-RMS, broad enough for crouch
+            "joint_indices": _LEG_JOINTS,
+            "target_overrides": None,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    
+    # ── Landing stability: rewards staying upright after landing ──────────────
+    cfg.rewards["landing_stable"] = RewardTermCfg(
+        func=microduck_mdp.landing_stability_reward,
         weight=1.0,
         params={
-            "std": 0.3,
-            "joint_indices": _NECK_JOINTS,
-            "target_overrides": None,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+            "sensor_name": feet_ground_cfg.name,
+            "stand_z": STAND_Z,
         },
     )
 
-    # Upright
-    cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
-    cfg.rewards["upright"].weight = 2.0
-    cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
-
     # ── Sim2real regularisers ─────────────────────────────────────────────────
+    # Match standup pattern: light penalties for smooth motion
     cfg.rewards["action_rate_l2"].weight = -0.1
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
     cfg.rewards["body_ang_vel"].weight = -0.05
     cfg.rewards["angular_momentum"].weight = -0.02
 
-    # Impact penalty: limit landing force
+    # Impact penalty: limit landing force (delayed via curriculum)
     cfg.rewards["impact_penalty"] = RewardTermCfg(
         func=microduck_mdp.impact_penalty,
-        weight=-0.05,
+        weight=0.0,  # delayed to stage 2
         params={
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    
+    # ── Delete old upright reward (replaced by upright_linear/upright_sharp) ──
+    if "upright" in cfg.rewards:
+        del cfg.rewards["upright"]
 
     # ── Observations (unified 61D actor layout) ───────────────────────────────
     del cfg.observations["actor"].terms["base_lin_vel"]
@@ -418,9 +482,22 @@ def make_microduck_jump_env_cfg(
         )
 
     # ── Curriculum ────────────────────────────────────────────────────────────
-    # Phase 1: Learn to leave the ground (0-1000 iter)
-    # Phase 2: Maximize height (1000-3000 iter)
-    # Phase 3: Optimize landing (3000-5000 iter)
+    # Phase 1 (0-1000 iter): Discovery phase
+    #   - Strong upward velocity reward to encourage any upward motion
+    #   - Strong air time reward to encourage leaving the ground
+    #   - Light action_rate penalty to allow exploration
+    #   - No impact penalty (let it crash, learn from failures)
+    #
+    # Phase 2 (1000-3000 iter): Refinement phase
+    #   - Increase height rewards for precision
+    #   - Increase composite reward for coordinated movement
+    #   - Introduce impact penalty to protect hardware
+    #   - Increase action_rate penalty for smoother motion
+    #
+    # Phase 3 (3000-5000 iter): Optimization phase
+    #   - Further increase height and composite rewards
+    #   - Increase landing stability reward
+    #   - Stronger regularization for sim2real transfer
     cfg.curriculum["jump_stages"] = CurriculumTermCfg(
         func=microduck_mdp.curriculum_reward_weight,
         params={
@@ -428,33 +505,48 @@ def make_microduck_jump_env_cfg(
                 {
                     "step": 0,
                     "reward_weights": {
-                        "height_jump": 2.0,
-                        "air_time_jump": 2.0,
-                        "landing_stable": 1.0,
-                        "upright": 1.0,
-                        "action_rate_l2": -0.005,
+                        "height_jump_wide": 1.0,
+                        "height_jump_sharp": 1.0,
+                        "height_jump_l1": 3.0,
+                        "com_upward_velocity": 1.5,
+                        "air_time_jump": 1.0,
+                        "upright_linear": 1.0,
+                        "upright_sharp": 1.0,
+                        "jump_composite": 1.5,
+                        "landing_stable": 0.5,
+                        "action_rate_l2": -0.05,
                         "impact_penalty": 0.0,
                     },
                 },
                 {
                     "step": 1000 * 24,
                     "reward_weights": {
-                        "height_jump": 5.0,
-                        "air_time_jump": 1.0,
-                        "landing_stable": 2.0,
-                        "upright": 1.0,
-                        "action_rate_l2": -0.01,
-                        "impact_penalty": -0.02,
+                        "height_jump_wide": 1.5,
+                        "height_jump_sharp": 1.5,
+                        "height_jump_l1": 4.0,
+                        "com_upward_velocity": 1.0,
+                        "air_time_jump": 0.8,
+                        "upright_linear": 1.5,
+                        "upright_sharp": 1.5,
+                        "jump_composite": 2.0,
+                        "landing_stable": 0.8,
+                        "action_rate_l2": -0.08,
+                        "impact_penalty": -0.03,
                     },
                 },
                 {
                     "step": 3000 * 24,
                     "reward_weights": {
-                        "height_jump": 5.0,
+                        "height_jump_wide": 1.5,
+                        "height_jump_sharp": 1.5,
+                        "height_jump_l1": 5.0,
+                        "com_upward_velocity": 1.0,
                         "air_time_jump": 0.5,
-                        "landing_stable": 3.0,
-                        "upright": 1.0,
-                        "action_rate_l2": -0.01,
+                        "upright_linear": 1.5,
+                        "upright_sharp": 1.5,
+                        "jump_composite": 2.0,
+                        "landing_stable": 1.0,
+                        "action_rate_l2": -0.1,
                         "impact_penalty": -0.05,
                     },
                 },
