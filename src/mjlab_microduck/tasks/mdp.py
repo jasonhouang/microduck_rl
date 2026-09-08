@@ -5853,6 +5853,54 @@ def ball_vel_in_base(
     return torch.bmm(rot.transpose(1, 2), vel.unsqueeze(-1)).squeeze(-1)
 
 
+def ball_speed_penalty(
+    env: ManagerBasedRlEnv,
+    asset_name: str = "ball",
+    max_speed: float = 0.3,
+) -> torch.Tensor:
+    """Penalty for ball moving too fast (encourages ball stability).
+    
+    Returns positive value proportional to ball speed above threshold.
+    Should be used with negative weight as a penalty.
+    """
+    ball: Entity = env.scene[asset_name]
+    vel_xy = ball.data.root_link_lin_vel_w[:, :2]
+    speed = vel_xy.norm(dim=1)
+    # Return speed above threshold (clamped to 0 if below)
+    return torch.nan_to_num(speed, nan=0.0).clamp(0.0)
+
+
+def com_over_ball_reward(
+    env: ManagerBasedRlEnv,
+    robot_asset: str = "robot",
+    ball_asset: str = "ball",
+    max_distance: float = 0.05,
+) -> torch.Tensor:
+    """Reward for keeping robot COM above the ball contact point.
+    
+    Returns Gaussian reward based on horizontal distance between robot COM
+    and ball position. Closer = higher reward.
+    """
+    robot: Entity = env.scene[robot_asset]
+    ball: Entity = env.scene[ball_asset]
+    
+    # Robot COM (xy only)
+    robot_xy = robot.data.root_link_pos_w[:, :2]
+    
+    # Ball position (xy only)
+    ball_xy = ball.data.root_link_pos_w[:, :2]
+    
+    # Horizontal distance
+    distance = (robot_xy - ball_xy).norm(dim=1)
+    
+    # Gaussian reward: exp(-distance^2 / (2 * std^2))
+    # Use max_distance as std for reasonable reward falloff
+    std = max_distance
+    reward = torch.exp(-distance**2 / (2 * std**2))
+    
+    return torch.nan_to_num(reward, nan=0.0)
+
+
 # --------------------------------------------------------------------------- #
 # Tâche SPIN — rotation rapide sur place sur rollers                            #
 # --------------------------------------------------------------------------- #

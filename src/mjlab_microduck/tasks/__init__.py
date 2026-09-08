@@ -79,6 +79,10 @@ from .microduck_jump_env_cfg import (
     make_microduck_jump_env_cfg,
     MicroduckJumpRlCfg,
 )
+from .microduck_ball_balance_env_cfg import (
+    make_microduck_ball_balance_env_cfg,
+    MicroduckBallBalanceRlCfg,
+)
 from .backlash import make_backlash_variant
 
 # Standard velocity task
@@ -243,6 +247,15 @@ register_mjlab_task(
     env_cfg=make_microduck_jump_env_cfg(),
     play_env_cfg=make_microduck_jump_env_cfg(play=True),
     rl_cfg=MicroduckJumpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# BallBalance — stand on a ball and maintain balance.
+register_mjlab_task(
+    task_id="Mjlab-BallBalance-Flat-MicroDuck",
+    env_cfg=make_microduck_ball_balance_env_cfg(),
+    play_env_cfg=make_microduck_ball_balance_env_cfg(play=True),
+    rl_cfg=MicroduckBallBalanceRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
