@@ -7196,20 +7196,21 @@ def height_jump_reward(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     target_height: float = 0.165,
+    height_std: float = 0.05,
 ) -> torch.Tensor:
-    """Potential-based height reward for jumping.
+    """Hybrid height reward for jumping.
     
-    Rewards incremental height gains (potential-based), not absolute height.
-    Camping at any height pays zero per step. Uses max-so-far tracking so
-    the policy is rewarded for reaching new heights.
+    Combines potential-based reward (encourages breaking height records) with
+    absolute height reward (encourages approaching target height).
     
     Args:
         env: The environment
         asset_cfg: Asset configuration for the robot
         target_height: Target height above standing (STAND_Z + jump_height)
+        height_std: Standard deviation for Gaussian height reward
     
     Returns:
-        Reward tensor (num_envs,) - potential-based height gain
+        Reward tensor (num_envs,) - combined height reward
     """
     asset: Entity = env.scene[asset_cfg.name]
     
@@ -7217,18 +7218,23 @@ def height_jump_reward(
     z = asset.data.root_link_pos_w[:, 2]
     z = torch.nan_to_num(z, nan=0.0)
     
-    # Track max height seen in this episode
+    # 1. Potential-based reward: incremental height gains
     if not hasattr(env, '_jump_max_height'):
         env._jump_max_height = z.clone()
     
     max_height = env._jump_max_height
     new_max = torch.maximum(max_height, z)
-    
-    # Reward is the incremental height gain
-    reward = new_max - max_height
+    potential_reward = new_max - max_height
     
     # Update max height
     env._jump_max_height = new_max
+    
+    # 2. Absolute height reward: encourage approaching target
+    # Gaussian reward centered at target_height
+    absolute_reward = torch.exp(-torch.square(z - target_height) / (2 * height_std**2))
+    
+    # Combine rewards
+    reward = potential_reward + absolute_reward
     
     return reward
 
