@@ -7215,10 +7215,11 @@ def height_jump_reward(
     
     # Get current trunk height
     z = asset.data.root_link_pos_w[:, 2]
+    z = torch.nan_to_num(z, nan=0.0)
     
     # Track max height seen in this episode
     if not hasattr(env, '_jump_max_height'):
-        env._jump_max_height = torch.zeros(env.num_envs, device=env.device)
+        env._jump_max_height = z.clone()
     
     max_height = env._jump_max_height
     new_max = torch.maximum(max_height, z)
