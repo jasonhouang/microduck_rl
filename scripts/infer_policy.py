@@ -208,6 +208,167 @@ class TerminalInput:
                 return keys
 
 
+class _NullContext:
+    """No-op context manager for when gamepad is disabled."""
+    def __enter__(self):
+        return None
+    def __exit__(self, *exc):
+        pass
+
+
+class GamepadInput:
+    """Xbox controller input reader using pygame.
+
+    Button mapping (mirrors keyboard controls):
+    ============================================
+    Default mode (Velocity):
+    - Left stick Y:      forward/backward (lin_vel_x)
+    - Left stick X:      turn left/right (ang_vel_z)
+    - Right stick:       head pitch/yaw/roll (in head mode)
+    - A button:          reset (context-dependent)
+    - B button:          sit/stand toggle (Y)
+    - X button:          kick left (K)
+    - Y button:          kick right (L)
+    - RB:                roulade (R)
+    - LB:                random push (P)
+    - Start:             quit (Q)
+    - Back:              toggle policy (T)
+    - D-pad up:          toggle head mode (H)
+    - D-pad down:        toggle body pose mode (B)
+    - D-pad left:        ground pick (G)
+
+    Head mode (toggle with D-pad up):
+    - Right stick:       head pitch/yaw
+    - Left stick X:      head roll
+    - A button:          reset head offset (SPACE)
+
+    Body pose mode (toggle with D-pad down):
+    - Left stick Y:      z height
+    - Left stick X:      yaw
+    - Right stick:       pitch/roll
+    - A button:          reset body pose (SPACE)
+    """
+
+    # Xbox controller button indices (pygame)
+    BTN_A = 0
+    BTN_B = 1
+    BTN_X = 2
+    BTN_Y = 3
+    BTN_LB = 4
+    BTN_RB = 5
+    BTN_BACK = 6
+    BTN_START = 7
+    BTN_LEFT_STICK = 8   # Left stick click
+    BTN_RIGHT_STICK = 9  # Right stick click
+
+    # Axis indices
+    AXIS_LEFT_X = 0
+    AXIS_LEFT_Y = 1
+    AXIS_RIGHT_X = 2
+    AXIS_RIGHT_Y = 3
+    AXIS_LT = 4
+    AXIS_RT = 5
+
+    DEADZONE = 0.15  # Ignore small stick movements
+
+    def __init__(self):
+        self.enabled = False
+        self.joystick = None
+        self._prev_buttons = {}
+        self._keys_queue = []
+        # Analog stick values (normalized -1 to 1)
+        self.left_stick = (0.0, 0.0)  # (x, y)
+        self.right_stick = (0.0, 0.0)
+
+    def __enter__(self):
+        try:
+            import pygame
+            pygame.init()
+            pygame.joystick.init()
+            if pygame.joystick.get_count() == 0:
+                print("WARNING: No gamepad detected — keyboard only")
+                return self
+            self.joystick = pygame.joystick.Joystick(0)
+            self.joystick.init()
+            self.enabled = True
+            print(f"Gamepad connected: {self.joystick.get_name()}")
+        except Exception as e:
+            print(f"WARNING: Gamepad init failed: {e} — keyboard only")
+        return self
+
+    def __exit__(self, *exc):
+        if self.enabled:
+            import pygame
+            pygame.quit()
+        self.enabled = False
+
+    def _apply_deadzone(self, value):
+        """Apply deadzone to analog stick value."""
+        if abs(value) < self.DEADZONE:
+            return 0.0
+        # Rescale so 0.15 maps to 0, 1.0 maps to 1.0
+        sign = 1 if value > 0 else -1
+        return sign * (abs(value) - self.DEADZONE) / (1.0 - self.DEADZONE)
+
+    def update(self):
+        """Poll gamepad events and update state. Call once per frame."""
+        if not self.enabled:
+            return
+        import pygame
+        self._keys_queue = []
+        for event in pygame.event.get():
+            if event.type == pygame.JOYBUTTONDOWN:
+                btn = event.button
+                if btn == self.BTN_A:
+                    self._keys_queue.append(" ")  # reset (context-dependent)
+                elif btn == self.BTN_B:
+                    self._keys_queue.append("y")  # sit/stand toggle
+                elif btn == self.BTN_X:
+                    self._keys_queue.append("k")  # kick left
+                elif btn == self.BTN_Y:
+                    self._keys_queue.append("l")  # kick right
+                elif btn == self.BTN_RB:
+                    self._keys_queue.append("r")  # roulade
+                elif btn == self.BTN_LB:
+                    self._keys_queue.append("p")  # random push
+                elif btn == self.BTN_START:
+                    self._keys_queue.append("q")  # quit
+                elif btn == self.BTN_BACK:
+                    self._keys_queue.append("t")  # toggle policy
+                elif btn == self.BTN_LEFT_STICK:
+                    self._keys_queue.append(" ")  # reset (context-dependent)
+                elif btn == self.BTN_RIGHT_STICK:
+                    self._keys_queue.append(" ")  # reset (context-dependent)
+            elif event.type == pygame.JOYHATMOTION:
+                # D-pad
+                hat = event.value
+                if hat[1] == 1:   # up
+                    self._keys_queue.append("h")  # toggle head mode
+                elif hat[1] == -1:  # down
+                    self._keys_queue.append("b")  # toggle body pose mode
+                elif hat[0] == -1:  # left
+                    self._keys_queue.append("g")  # ground pick
+                elif hat[0] == 1:   # right
+                    self._keys_queue.append("f")  # future use / unused
+
+        # Read analog sticks
+        if self.joystick:
+            lx = self._apply_deadzone(self.joystick.get_axis(self.AXIS_LEFT_X))
+            ly = self._apply_deadzone(self.joystick.get_axis(self.AXIS_LEFT_Y))
+            rx = self._apply_deadzone(self.joystick.get_axis(self.AXIS_RIGHT_X))
+            ry = self._apply_deadzone(self.joystick.get_axis(self.AXIS_RIGHT_Y))
+            self.left_stick = (lx, ly)
+            self.right_stick = (rx, ry)
+
+    def get_keys(self):
+        """Return button presses as virtual key names."""
+        if not self.enabled:
+            return []
+        keys = self._keys_queue.copy()
+        self._keys_queue = []
+        return keys
+
+
 class PolicyInference:
     def __init__(self, model, data, walking_onnx_path=None, action_scale=1.0, bam_ctrl=None,
                  delay_min_lag=0, delay_max_lag=0,
@@ -915,6 +1076,7 @@ def main():
     parser.add_argument("--raw-accelerometer", action="store_true", help="Use raw accelerometer instead of projected gravity")
     parser.add_argument("--delay", type=int, nargs='*', default=None, help="Enable actuator delay: --delay MIN MAX or --delay LAG")
     parser.add_argument("--debug", action="store_true", help="Print observations and actions")
+    parser.add_argument("--gamepad", action="store_true", help="Enable Xbox gamepad control (left stick = move, buttons = actions)")
     parser.add_argument("--save-csv", type=str, default=None, help="Save observations and actions to CSV file")
     parser.add_argument("--record", type=str, default=None, help="Enable recording mode: save observations to pickle file on Ctrl+C")
     parser.add_argument("--switch-threshold", type=float, default=0.05, help="Vel command magnitude threshold for walking/standing switch (default: 0.05)")
@@ -1356,8 +1518,35 @@ def main():
     print("  LEFT/RIGHT arrow: head_yaw ±step")
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
+    if args.gamepad:
+        print("  [ Xbox Gamepad ]")
+        print("  Default mode:")
+        print("    Left stick Y:   forward/back")
+        print("    Left stick X:   turn left/right")
+        print("    Right stick:    head control (when head mode ON)")
+        print("    A:              reset velocity / head / body pose")
+        print("    B:              sit/stand toggle (Y key)")
+        print("    X:              kick left (K)")
+        print("    Y:              kick right (L)")
+        print("    RB:             roulade (R)")
+        print("    LB:             random push (P)")
+        print("    Start:          quit (Q)")
+        print("    Back:           toggle policy (T)")
+        print("    D-pad up:       toggle HEAD mode (H)")
+        print("    D-pad down:     toggle BODY POSE mode (B)")
+        print("    D-pad left:     ground pick (G)")
+        print("  Head mode (D-pad up):")
+        print("    Right stick:    head pitch/yaw")
+        print("    Left stick X:   head roll")
+        print("    A:              reset head offset")
+        print("  Body pose mode (D-pad down):")
+        print("    Left stick:     z height / yaw")
+        print("    Right stick:    pitch / roll")
+        print("    A:              reset body pose")
 
+    gamepad = GamepadInput() if args.gamepad else None
     with TerminalInput() as term, \
+         (gamepad if gamepad else _NullContext()) as gp, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
         viewer.sync()
         start_time = time.time()
@@ -1373,6 +1562,51 @@ def main():
 
             while viewer.is_running() and not quit_requested:
                 step_start = time.time()
+
+                # Gamepad: update state and read button presses
+                if gp:
+                    gp.update()
+                    for key in gp.get_keys():
+                        handle_key(key)
+
+                    lx, ly = gp.left_stick
+                    rx, ry = gp.right_stick
+
+                    # Debug: print stick values periodically
+                    if control_step_count % 100 == 0 and gp.enabled:
+                        print(f"[gamepad] L=({lx:+.2f}, {ly:+.2f}) R=({rx:+.2f}, {ry:+.2f}) head={policy.head_mode} body={policy.body_pose_mode}")
+
+                    # Default mode (Velocity): left stick = move/turn, right stick = head
+                    if gp.enabled and not policy.head_mode and not policy.body_pose_mode:
+                        # ly is inverted (up = -1, down = +1 in pygame)
+                        vx = -ly * policy.vel_max_x if abs(ly) > 0.01 else policy.vel_cmd[0]
+                        # Left stick X = turn (like most games)
+                        yaw = -lx * policy.vel_max_ang if abs(lx) > 0.01 else policy.vel_cmd[2]
+                        # No strafe by default in this mode
+                        vy = policy.vel_cmd[1]
+                        if abs(ly) > 0.01 or abs(lx) > 0.01:
+                            policy.set_vel_cmd(vx, vy, yaw)
+
+                    # Head mode: right stick = head pitch/yaw, left stick X = head roll
+                    elif gp.enabled and policy.head_mode:
+                        if abs(rx) > 0.01 or abs(ry) > 0.01:
+                            policy.head_offset[1] = np.clip(-ry * 0.5, -policy.head_max, policy.head_max)  # pitch
+                            policy.head_offset[2] = np.clip(-rx * 0.5, -policy.head_max, policy.head_max)  # yaw
+                            policy._update_command()
+                        if abs(lx) > 0.01:
+                            policy.head_offset[3] = np.clip(-lx * 0.5, -policy.head_max, policy.head_max)  # roll
+                            policy._update_command()
+
+                    # Body pose mode: left stick = z/yaw, right stick = pitch/roll
+                    elif gp.enabled and policy.body_pose_mode:
+                        if abs(ly) > 0.01:
+                            policy.bump_body("z", -ly * policy.body_cmd_step_z * 0.5)
+                        if abs(lx) > 0.01:
+                            policy.bump_body("yaw", -lx * policy.body_cmd_step_angle * 0.5)
+                        if abs(ry) > 0.01:
+                            policy.bump_body("pitch", ry * policy.body_cmd_step_angle * 0.5)
+                        if abs(rx) > 0.01:
+                            policy.bump_body("roll", rx * policy.body_cmd_step_angle * 0.5)
 
                 for key in term.get_keys():
                     handle_key(key)
