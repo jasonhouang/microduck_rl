@@ -122,25 +122,23 @@ FULL_COLLISION = CollisionCfg(
     # base_cfg=XmlPositionActuatorCfg(joint_names_expr=(r".*",)),
 # )
 
-# -- BAM M6 actuator (full voltage control + load-dependent friction) --
+# -- BAM M5 actuator (Feetech HD-1910, 5V rail, full voltage control + load-dependent friction) --
 # Exclude passive_* joints (jaw linkage in the new model has no XML actuator).
-# Voltage domain randomization (mirrors mjlab_microban):
-#   - vin_range: per-env battery voltage sampled at startup (replaces fixed vin)
-#   - vin_drop_gain_range: load-dependent voltage sag V_drop = gain * sum(|tau|)
+# Voltage domain randomization:
+#   - vin_range: per-env battery voltage sampled at startup (regulated 5V ±5%)
+#   - vin_drop_resistance_range: load-dependent voltage sag V_drop = R * I_bat
 #   - vin_min: hard floor on the effective voltage after sag
-# kp_fw kept at 200 (microduck's preserved firmware stiffness; microban uses 125).
+# kp_fw = 32: HD-1910 firmware Kp (reg50 SRAM / reg21 EPROM = 32, real robot readback).
 _BAM_ACTUATOR_KWARGS = dict(
-    motor_name="xl330",
-    model="m6",
+    motor_name="hd1910",
+    model="m5",
     target_names_expr=(r"^(?!passive_).*",),
-    kp_fw=200.0,  # microduck's preserved firmware stiffness (microban uses 125)
-    # vin_range=(6.9, 7.9),
-    vin_range=(6.5, 8.2),
-    vin_drop_gain_range=(0.0, 0.2),
-    vin_min=6.0,
-    # max_current=1.75,
-    delay_min_lag=3,
-    delay_max_lag=6,
+    kp_fw=32.0,
+    vin_range=(4.75, 5.25),
+    vin_drop_resistance_range=(0.0, 0.069),
+    vin_min=4.0,
+    delay_min_lag=4,
+    delay_max_lag=7,
 )
 actuators = FrictionDRBamActuatorCfg(**_BAM_ACTUATOR_KWARGS)
 

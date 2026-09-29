@@ -25,18 +25,18 @@ MICRODUCK_XML = "src/mjlab_microduck/robot/microduck/scene.xml"
 MICRODUCK_ROLLERS_XML = "src/mjlab_microduck/robot/microduck/scene_rollers.xml"
 MICRODUCK_BALL_XML = "src/mjlab_microduck/robot/microduck/scene_ball.xml"
 
-# BAM M6 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
+# BAM M5 defaults — MUST mirror `_BAM_ACTUATOR_KWARGS` in
 # src/mjlab_microduck/robot/microduck_constants.py (the actuator every policy is
 # trained against in warp). Not imported from there: that module drags in
 # mjlab/torch/warp (~16 s import) for a CPU rehearsal script. Locked by
 # tests/test_infer_policy_bam.py.
-BAM_MOTOR_NAME = "xl330"
-BAM_MODEL = "m6"
-BAM_KP_FW = 200.0                 # microduck's preserved firmware stiffness
-BAM_VIN_RANGE = (6.5, 8.2)        # per-env battery voltage DR in training
-BAM_VIN_DROP_GAIN_RANGE = (0.0, 0.2)  # load-dependent sag V_drop = gain * sum|tau|
-BAM_VIN_MIN = 6.0                 # floor on effective voltage after sag
-BAM_MAX_CURRENT = None            # training runs WITHOUT the firmware current limiter
+BAM_MOTOR_NAME = "hd1910"
+BAM_MODEL = "m5"
+BAM_KP_FW = 32.0                    # HD-1910 firmware Kp (reg50)
+BAM_VIN_RANGE = (4.75, 5.25)        # per-env battery voltage DR in training (regulated 5V ±5%)
+BAM_VIN_DROP_RESISTANCE_RANGE = (0.0, 0.069)  # load-dependent sag V_drop = R * I_bat
+BAM_VIN_MIN = 4.0                   # floor on effective voltage after sag
+BAM_MAX_CURRENT = None              # training runs WITHOUT the firmware current limiter
 # Stiff joint-friction constraint, copied from bam.mjlab.BamActuator
 # (stiff_frictionloss=True in training): warp has no noslip solver, so BAM
 # stiffens frictionloss so a statically-held joint does not creep. Mirrored
@@ -55,7 +55,7 @@ def load_bam_model(kp_fw: float, vin: float, max_current):
     return bam_model
 
 
-def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min):
+def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_resistance, vin_min):
     """Load the scene and hand every non-passive actuator to bam.mujoco.MujocoController.
 
     Mirrors bam.mjlab.BamActuator.edit_spec (what warp does at training time):
@@ -95,13 +95,28 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
     model.opt.timestep = timestep
     data = mujoco.MjData(model)
     bam_ctrl = MujocoController(bam_model, names, model, data,
-                                vin_drop_gain=vin_drop_gain, vin_min=vin_min)
+                                vin_drop_resistance=vin_drop_resistance, vin_min=vin_min)
     print(f"BAM {BAM_MODEL} actuators on {len(names)} joints: kt={kt:.4f} R={R:.4f} "
           f"vin={bam_model.actuator.vin:.2f}V kp_fw={bam_model.actuator.kp:.0f} "
-          f"vin_drop_gain={vin_drop_gain} vin_min={vin_min} "
+          f"vin_drop_resistance={vin_drop_resistance} vin_min={vin_min} "
           f"max_current={bam_model.actuator.max_current} forcerange=+/-{force_limit:.3f}Nm "
           f"armature={bam_model.actuator.get_extra_inertia():.2e}")
     return model, data, bam_ctrl, names
+
+
+def reset_bam_ctrl(bam_ctrl, qpos):
+    """Replace the removed MujocoController.reset(qpos) call.
+
+    Sets q_target to current joint positions and initialises the actuator's
+    internal rate-limited target (q_target_smooth) so the first compute_control
+    does not see a stale zero.
+    """
+    bam_ctrl.q_target[:] = qpos[bam_ctrl.qpos_indexes]
+    act = bam_ctrl.model.actuator
+    # Initialise the firmware rate-limiter state so compute_control doesn't
+    # see an uninitialised q_target_smooth on the first step.
+    act.q_target_smooth = np.copy(bam_ctrl.q_target)
+    act.reset()
 
 
 # Body pose command constants (must match training constants)
@@ -926,12 +941,12 @@ def main():
     parser.add_argument("--no-bam", action="store_true",
                         help="Use the XML MuJoCo position actuators instead of the BAM M6 "
                              "voltage/friction model the policies are trained against.")
-    parser.add_argument("--vin", type=float, default=7.4,
+    parser.add_argument("--vin", type=float, default=5.0,
                         help="BAM battery voltage [V]. Training samples per-env in "
-                             f"{BAM_VIN_RANGE}; 7.4 = nominal 2S LiPo.")
-    parser.add_argument("--vin-drop-gain", type=float, default=0.1,
-                        help="BAM load-dependent voltage sag gain [V/Nm], V = vin - gain*sum|tau|. "
-                             f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
+                             f"{BAM_VIN_RANGE}; 5.0 = regulated rail.")
+    parser.add_argument("--vin-drop-resistance", type=float, default=0.035,
+                        help="BAM load-dependent voltage sag resistance [Ohm], V = vin - R*I_bat. "
+                             f"Training samples per-env in {BAM_VIN_DROP_RESISTANCE_RANGE}. 0 disables.")
     parser.add_argument("--kp-fw", type=float, default=BAM_KP_FW,
                         help="BAM firmware P-gain (training uses %(default)s).")
     parser.add_argument("--current-limit", type=float, default=0.0,
@@ -989,14 +1004,14 @@ def main():
     print(f"Loading MuJoCo model from: {xml_path}")
     bam_ctrl = None
     if not args.no_bam:
-        # Same actuator the policies are trained against in warp (BAM M6 XL330,
+        # Same actuator the policies are trained against in warp (BAM M5 HD-1910,
         # voltage control + load-dependent friction budget), driven on CPU by
         # bam.mujoco.MujocoController. Voltage DR collapses to fixed --vin /
-        # --vin-drop-gain (training samples them per env).
+        # --vin-drop-resistance (training samples them per env).
         bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
-        vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
+        vin_drop_resistance = args.vin_drop_resistance if args.vin_drop_resistance > 0 else None
         model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
-            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
+            xml_path, bam_model, 0.005, vin_drop_resistance, BAM_VIN_MIN)
     else:
         model = mujoco.MjModel.from_xml_path(xml_path)
         model.opt.timestep = 0.005
@@ -1099,7 +1114,7 @@ def main():
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
     if bam_ctrl is not None:
-        bam_ctrl.reset(data.qpos)   # clears voltage-drop state, q_target = current qpos
+        reset_bam_ctrl(bam_ctrl, data.qpos)   # clears voltage-drop state, q_target = current qpos
     policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 
